@@ -32,7 +32,7 @@ jobs:
 
       - name: Atualizar base do DOU
         run: |
-          python scripts/atualizar_dou.py --dias 3
+          python scripts/atualizar_dou.py --dias 10 --termo "PORTARIA MESP"
 
       - name: Verificar alterações
         id: diff
