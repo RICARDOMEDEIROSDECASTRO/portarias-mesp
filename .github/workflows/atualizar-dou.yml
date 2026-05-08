@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   atualizar:
     runs-on: ubuntu-latest
@@ -23,10 +26,13 @@ jobs:
           python-version: "3.11"
 
       - name: Instalar dependências
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Atualizar base do DOU
-        run: python scripts/atualizar_dou.py --dias 3
+        run: |
+          python scripts/atualizar_dou.py --dias 3
 
       - name: Verificar alterações
         id: diff
@@ -45,3 +51,8 @@ jobs:
           git add index.html
           git commit -m "Atualiza portarias do DOU"
           git push
+
+      - name: Informar ausência de novas portarias
+        if: steps.diff.outputs.changed == 'false'
+        run: |
+          echo "Nenhuma nova portaria encontrada no período pesquisado."
