@@ -79,6 +79,9 @@ def data_key(reg: dict) -> int:
         return 0
     return dt.year * 10000 + dt.month * 100 + dt.day
 
+def eh_portaria_mesp(texto):
+    texto = normalizar(texto)
+    return "PORTARIA" in texto and "MESP" in texto
 
 def numero_portaria(titulo: str) -> str:
     t = strip_html(titulo).upper()
