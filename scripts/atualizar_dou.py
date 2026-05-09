@@ -1,397 +1,358 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Atualiza o site estático de Portarias MESP usando a lógica de consulta do Ro-DOU.
+Atualiza o index.html do site de Portarias MESP usando o buscador estruturado do DOU.
 
-A ideia é reproduzir, em GitHub Actions, a pesquisa que o Ro-DOU faz sobre a
-busca oficial do DOU/Imprensa Nacional: termo, seção, data e filtros de ato.
-
-Critério de inclusão na base:
-    - o TÍTULO da publicação precisa conter PORTARIA e MESP;
-    - exemplos aceitos: PORTARIA MESP Nº 77, PORTARIA MEsp Nº 77,
-      PORTARIA MESP/GM Nº 77;
-    - menções soltas no corpo do texto, como "considerando a Portaria MESP...",
-      não entram se o título do ato não for Portaria MESP.
-
-Uso:
-    python scripts/atualizar_dou.py --dias 15
+Regra principal: NÃO apaga registros antigos.
+O script lê a lista DATA já existente no index.html, busca novas ocorrências de
+"portaria MESP" no DOU, junta tudo, remove duplicidades por link e regrava o HTML.
 """
 
-from __future__ import annotations
-
 import argparse
-import html
 import json
 import re
 import sys
 import time
-import unicodedata
-from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import quote, unquote, urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://www.in.gov.br"
-SEARCH_URL = "https://www.in.gov.br/consulta/-/buscar/dou"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; mesp-portarias-rodou/2.0; +https://www.gov.br/esporte)",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-}
+IN_API_BASE_URL = "https://www.in.gov.br/consulta/-/buscar/dou"
+IN_WEB_BASE_URL = "https://www.in.gov.br/web/dou/-/"
 
-# Mantemos o foco estrito em Portaria MESP.
-TERMOS_RODOU = [
-    '"PORTARIA MESP"',
-    '"PORTARIA MEsp"',
-    'PORTARIA MESP',
-]
-
-# Valores usados pela busca do DOU para as seções. O site aceita variações;
-# por isso o script consulta tanto "todos" quanto seções individualizadas.
-SECOES = ["", "do1", "do2", "do3", "doe", "edicao_extra", "edicao_suplementar"]
+SCRIPT_ID = "_br_com_seatecnologia_in_buscadou_BuscaDouPortlet_params"
 
 
-@dataclass
-class Registro:
-    data: str
-    ano: int
-    mes: int
-    secao: str
-    tipo: str
-    titulo: str
-    numero: str
-    orgao: str
-    resumo: str
-    link: str
+def limpar_html(texto_html):
+    if texto_html is None:
+        return ""
+    return BeautifulSoup(str(texto_html), "html.parser").get_text(" ", strip=True)
 
 
-def sem_acentos(s: str) -> str:
-    s = str(s or "")
-    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-
-
-def norm(s: str) -> str:
-    s = html.unescape(str(s or ""))
-    s = re.sub(r"<[^>]+>", " ", s)
-    s = sem_acentos(s).upper()
-    s = s.replace("º", " ").replace("°", " ")
-    s = re.sub(r"[^A-Z0-9/.-]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def strip_html(value: str) -> str:
-    value = re.sub(r"<[^>]+>", " ", str(value or ""))
-    value = html.unescape(value)
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def eh_portaria_mesp_titulo(titulo: str) -> bool:
-    t = norm(titulo)
-    return "PORTARIA" in t and "MESP" in t
-
-
-def parse_data_br(s: str) -> date | None:
-    m = re.search(r"(\d{2})/(\d{2})/(\d{4})", str(s or ""))
-    if not m:
-        return None
+def normalizar(texto):
     try:
-        return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-    except ValueError:
-        return None
+        import unicodedata
+        texto = unicodedata.normalize("NFD", str(texto or ""))
+        texto = "".join(ch for ch in texto if unicodedata.category(ch) != "Mn")
+    except Exception:
+        texto = str(texto or "")
+    return texto.upper().strip()
 
 
-def data_key(reg: dict) -> int:
-    dt = parse_data_br(reg.get("data", ""))
-    if not dt:
-        return 0
-    return dt.year * 10000 + dt.month * 100 + dt.day
-
-
-def numero_key(reg: dict) -> int:
-    n = re.sub(r"\D", "", str(reg.get("numero", "")))
-    return int(n or 0)
-
-
-def numero_portaria(titulo: str) -> str:
-    t = norm(titulo)
-    # PORTARIA MESP Nº 77; PORTARIA MESP/GM Nº 77; PORTARIA MEsp N. 77
-    m = re.search(r"PORTARIA\s+MESP(?:/[A-Z0-9]+)?\s*(?:N|NO|Nº|N°|NUMERO|N\.)?\s*([0-9]+(?:[./-][0-9]+)*)", t)
-    if m:
-        return m.group(1)
-    m = re.search(r"PORTARIA.*?MESP.*?([0-9]+(?:[./-][0-9]+)*)", t)
-    return m.group(1) if m else ""
-
-
-def extrair_const_data(index_html: str) -> list[dict]:
-    m = re.search(r"const\s+DATA\s*=\s*(\[.*?\]);\s*\nconst\s+months\s*=", index_html, flags=re.S)
-    if not m:
-        raise RuntimeError("Não encontrei o bloco `const DATA = [...]` no index.html.")
-    return json.loads(m.group(1))
-
-
-def substituir_const_data(index_html: str, data: list[dict]) -> str:
-    novo_json = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-    return re.sub(
-        r"const\s+DATA\s*=\s*\[.*?\];\s*\nconst\s+months\s*=",
-        "const DATA = " + novo_json + ";\nconst months=",
-        index_html,
-        flags=re.S,
+def eh_portaria_mesp(item):
+    texto = " ".join(
+        str(item.get(campo, "") or "")
+        for campo in ["title", "hierarchyStr", "content", "urlTitle", "artType"]
     )
+    texto_norm = normalizar(limpar_html(texto))
+    return "PORTARIA" in texto_norm and "MESP" in texto_norm
 
 
-def session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    return s
-
-
-def extrair_links_do_html(html_text: str) -> set[str]:
-    texto = html.unescape(html_text)
-    links: set[str] = set()
-
-    # Links em atributos HTML normais.
-    soup = BeautifulSoup(texto, "html.parser")
-    for a in soup.find_all("a", href=True):
-        href = a.get("href", "")
-        if "/web/dou/-/" in href:
-            links.add(urljoin(BASE_URL, href.split("?")[0]))
-
-    # Links dentro de JSON/scripts escapados.
-    for raw in re.findall(r"https?://(?:www\.)?in\.gov\.br/(?:en/)?web/dou/-/[^\"'<>\s\\]+", texto):
-        links.add(unquote(raw).split("?")[0])
-    for raw in re.findall(r"/(?:en/)?web/dou/-/[^\"'<>\s\\]+", texto):
-        links.add(urljoin(BASE_URL, unquote(raw)).split("?")[0])
-
-    # Normaliza /en/web/dou para /web/dou.
-    normalizados = set()
-    for link in links:
-        normalizados.add(link.replace("https://in.gov.br/en/web/dou/-/", "https://www.in.gov.br/web/dou/-/")
-                          .replace("https://www.in.gov.br/en/web/dou/-/", "https://www.in.gov.br/web/dou/-/"))
-    return normalizados
-
-
-def buscar_links_rodou(sess: requests.Session, dia: date, termo: str, secao: str) -> set[str]:
-    """Consulta a busca oficial do DOU com parâmetros equivalentes aos do Ro-DOU.
-
-    O Ro-DOU automatiza a busca da Imprensa Nacional. Aqui fazemos o mesmo,
-    mas sem Airflow, para funcionar dentro do GitHub Actions.
-    """
-    datas = [dia.strftime("%d-%m-%Y"), dia.strftime("%d/%m/%Y")]
-    links: set[str] = set()
-
-    for data_str in datas:
-        param_variants = []
-
-        # Variante clássica usada pelo buscador do DOU.
-        p = {"q": termo, "exactDate": data_str, "sortType": "0"}
-        if secao:
-            p["s"] = secao
-        param_variants.append(p)
-
-        # Variante com intervalo explícito, útil quando exactDate falha.
-        p = {"q": termo, "publishFrom": data_str, "publishTo": data_str, "sortType": "0"}
-        if secao:
-            p["s"] = secao
-        param_variants.append(p)
-
-        # Variante aproximada ao filtro avançado: título + tipo de ato.
-        p = {
-            "q": termo,
-            "exactDate": data_str,
-            "sortType": "0",
-            "field": "TITULO",
-            "pubtype": "Portaria",
-        }
-        if secao:
-            p["s"] = secao
-        param_variants.append(p)
-
-        for params in param_variants:
-            try:
-                r = sess.get(SEARCH_URL, params=params, timeout=60)
-                r.raise_for_status()
-                encontrados = extrair_links_do_html(r.text)
-                links.update(encontrados)
-            except Exception as exc:
-                print(f"[aviso] falha na busca DOU {dia} {secao or 'todas'} {termo}: {exc}", file=sys.stderr)
-
-    return links
-
-
-def texto_limpo(soup: BeautifulSoup) -> str:
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-    return re.sub(r"\s+", " ", soup.get_text(" ")).strip()
-
-
-def first_text(soup: BeautifulSoup, selectors: Iterable[str]) -> str:
-    for sel in selectors:
-        node = soup.select_one(sel)
-        if node:
-            txt = strip_html(node.get_text(" "))
-            if txt:
-                return txt
+def extrair_numero_portaria(titulo):
+    texto = str(titulo or "")
+    padroes = [
+        r"PORTARIA\s+MESP\s*(?:N[º°oO\.]*)?\s*([0-9][0-9\./-]*)",
+        r"PORTARIA\s+MESP\s+([0-9][0-9\./-]*)",
+    ]
+    for padrao in padroes:
+        m = re.search(padrao, texto, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
     return ""
 
 
-def secao_from_text(texto: str, secao_hint: str) -> str:
-    m = re.search(r"Se[cç][aã]o:\s*([123])", texto, flags=re.I)
-    if m:
-        return "DO" + m.group(1)
-    h = (secao_hint or "").lower()
-    if "do1" in h:
-        return "DO1"
-    if "do2" in h:
-        return "DO2"
-    if "do3" in h:
-        return "DO3"
-    if "extra" in h:
-        return "Extra"
-    if "suplementar" in h:
-        return "Suplementar"
-    return "DOU"
-
-
-def data_from_text(texto: str, fallback: date) -> date:
-    m = re.search(r"Publicado em:\s*(\d{2}/\d{2}/\d{4})", texto, flags=re.I)
-    if m:
-        dt = parse_data_br(m.group(1))
-        if dt:
-            return dt
-    return fallback
-
-
-def artigo_para_registro(sess: requests.Session, url: str, dia: date, secao_hint: str) -> Registro | None:
-    r = sess.get(url, timeout=60)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    titulo = first_text(soup, ["h1", ".title", ".titulo", "#title"])
-    if not titulo:
-        meta = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "title"})
-        titulo = strip_html(meta.get("content", "")) if meta else ""
-
-    if not eh_portaria_mesp_titulo(titulo):
+def parse_data_br(data_txt):
+    if not data_txt:
         return None
-
-    full_text = texto_limpo(soup)
-
-    orgao = first_text(soup, [".orgao-dou-data", ".orgao", ".documento-orgao", ".nome-orgao"])
-    if not orgao:
-        m = re.search(r"(Minist[eé]rio do Esporte(?:/[A-Za-zÀ-ÿ0-9 .ºª()\-]+){0,4})", full_text, flags=re.I)
-        orgao = strip_html(m.group(1)) if m else "Ministério do Esporte"
-
-    pub_date = data_from_text(full_text, dia)
-    secao = secao_from_text(full_text, secao_hint)
-
-    resumo = strip_html(full_text)
-    # Se possível, corta a partir do título.
-    pos = norm(resumo).find(norm(titulo)[:40]) if titulo else -1
-    if pos > 0:
-        resumo = resumo[pos:]
-    resumo = resumo[:420]
-    if len(resumo) >= 420:
-        resumo += "..."
-
-    return Registro(
-        data=pub_date.strftime("%d/%m/%Y"),
-        ano=pub_date.year,
-        mes=pub_date.month,
-        secao=secao,
-        tipo="Portaria",
-        titulo=strip_html(titulo),
-        numero=numero_portaria(titulo),
-        orgao=strip_html(orgao),
-        resumo=resumo,
-        link=url,
-    )
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(data_txt)[:10], fmt).date()
+        except Exception:
+            pass
+    return None
 
 
-def atualizar(index_path: Path, dias: int, pausa: float) -> int:
-    html_atual = index_path.read_text(encoding="utf-8")
-    dados = extrair_const_data(html_atual)
+def data_ordenacao(registro):
+    d = parse_data_br(registro.get("data"))
+    if d:
+        return d.strftime("%Y%m%d")
+    return "00000000"
 
-    links_existentes = {str(r.get("link", "")).strip() for r in dados if r.get("link")}
-    chaves_existentes = {
-        (norm(r.get("titulo", "")), str(r.get("data", "")))
-        for r in dados
+
+def requisitar_pagina(payload):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(compatible; PesquisaDOU-GitHubActions/1.0; +https://www.in.gov.br)"
+        ),
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Cache-Control": "no-cache",
+    }
+    resposta = requests.get(IN_API_BASE_URL, params=payload, headers=headers, timeout=40)
+    resposta.raise_for_status()
+    return resposta
+
+
+def extrair_resultados_da_pagina(html):
+    soup = BeautifulSoup(html, "html.parser")
+    script_tag = soup.find("script", id=SCRIPT_ID)
+
+    if script_tag is None:
+        return [], soup
+
+    conteudo = script_tag.string or "".join(script_tag.contents)
+    dados = json.loads(conteudo)
+    return dados.get("jsonArray", []), soup
+
+
+def descobrir_numero_paginas(soup):
+    last_page = soup.find("button", id="lastPage")
+    if last_page is not None:
+        try:
+            return int(last_page.text.strip())
+        except Exception:
+            return 1
+
+    second_page = soup.find("button", id="2btn")
+    if second_page is not None:
+        return 2
+
+    return 1
+
+
+def buscar_dou(termo, dias, secoes=None, busca_exata=True, pausa=1.0):
+    if secoes is None:
+        secoes = ["todos"]
+
+    data_final = datetime.today()
+    data_inicial = data_final - timedelta(days=max(0, dias - 1))
+
+    query = f'"{termo}"' if busca_exata else termo
+
+    payload = {
+        "q": query,
+        "exactDate": "personalizado",
+        "publishFrom": data_inicial.strftime("%d-%m-%Y"),
+        "publishTo": data_final.strftime("%d-%m-%Y"),
+        "sortType": "0",
+        "s": secoes,
     }
 
-    novos: list[dict] = []
-    sess = session()
-    hoje = date.today()
-    datas = [hoje - timedelta(days=i) for i in range(dias)]
+    print("Pesquisando no DOU")
+    print("Termo:", payload["q"])
+    print("Período:", payload["publishFrom"], "até", payload["publishTo"])
+    print("Seções:", ", ".join(secoes))
+    print("-" * 80)
 
-    for dia in datas:
-        candidatos: set[tuple[str, str]] = set()
-        for termo in TERMOS_RODOU:
-            for secao in SECOES:
-                links = buscar_links_rodou(sess, dia, termo, secao)
-                for link in links:
-                    candidatos.add((link, secao))
-        print(f"{dia}: {len(candidatos)} link(s) candidato(s) Ro-DOU/DOU")
+    resposta = requisitar_pagina(payload)
+    resultados_pagina, soup = extrair_resultados_da_pagina(resposta.content)
+    numero_paginas = descobrir_numero_paginas(soup)
 
-        for link, secao in sorted(candidatos):
-            if link in links_existentes:
-                continue
-            try:
-                reg = artigo_para_registro(sess, link, dia, secao)
-                time.sleep(pausa)
-            except Exception as exc:
-                print(f"[aviso] falha ao ler {link}: {exc}", file=sys.stderr)
-                continue
-            if not reg:
-                continue
-            d = asdict(reg)
-            chave = (norm(d.get("titulo", "")), str(d.get("data", "")))
-            if chave in chaves_existentes:
-                continue
-            novos.append(d)
-            links_existentes.add(link)
-            chaves_existentes.add(chave)
-            print(f"+ {d['data']} | {d['titulo']} | {d['link']}")
+    print("Páginas estimadas:", numero_paginas)
+    print("Resultados na primeira página:", len(resultados_pagina))
 
-    if not novos:
-        print("Nenhuma Portaria MESP nova encontrada no período pesquisado.")
+    todos_resultados = []
+    ultimo_item = None
+
+    for item in resultados_pagina:
+        todos_resultados.append(item)
+        ultimo_item = item
+
+    for pagina in range(2, numero_paginas + 1):
+        if ultimo_item is None:
+            break
+
+        payload.update({
+            "id": ultimo_item.get("classPK"),
+            "displayDate": ultimo_item.get("displayDateSortable"),
+            "newPage": pagina,
+            "currentPage": pagina - 1,
+        })
+
+        print(f"Coletando página {pagina} de {numero_paginas}...")
+        try:
+            resposta = requisitar_pagina(payload)
+            resultados_pagina, soup = extrair_resultados_da_pagina(resposta.content)
+        except Exception as exc:
+            print(f"Erro ao coletar página {pagina}: {exc}")
+            continue
+
+        for item in resultados_pagina:
+            todos_resultados.append(item)
+            ultimo_item = item
+
+        time.sleep(pausa)
+
+    registros = []
+    for item in todos_resultados:
+        if not eh_portaria_mesp(item):
+            continue
+
+        data = item.get("pubDate") or ""
+        d = parse_data_br(data)
+        titulo = item.get("title") or ""
+        link = IN_WEB_BASE_URL + (item.get("urlTitle") or "")
+
+        registros.append({
+            "data": data,
+            "ano": d.year if d else "",
+            "mes": d.month if d else "",
+            "secao": item.get("pubName") or "",
+            "tipo": item.get("artType") or "",
+            "titulo": titulo,
+            "numero": extrair_numero_portaria(titulo + " " + link),
+            "orgao": item.get("hierarchyStr") or "",
+            "resumo": limpar_html(item.get("content", "")),
+            "link": link,
+        })
+
+    print("Portarias MESP encontradas no período:", len(registros))
+    return registros
+
+
+def extrair_array_data(html):
+    marcador = "const DATA ="
+    pos = html.find(marcador)
+    if pos == -1:
+        raise RuntimeError("Não encontrei 'const DATA =' no index.html.")
+
+    inicio = html.find("[", pos)
+    if inicio == -1:
+        raise RuntimeError("Não encontrei o início '[' da lista DATA.")
+
+    dentro_string = False
+    escape = False
+    profundidade = 0
+
+    for i in range(inicio, len(html)):
+        ch = html[i]
+
+        if dentro_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                dentro_string = False
+            continue
+
+        if ch == '"':
+            dentro_string = True
+        elif ch == "[":
+            profundidade += 1
+        elif ch == "]":
+            profundidade -= 1
+            if profundidade == 0:
+                fim = i + 1
+                return inicio, fim, json.loads(html[inicio:fim])
+
+    raise RuntimeError("Não consegui localizar o fim da lista DATA.")
+
+
+def chave_registro(registro):
+    link = str(registro.get("link") or "").strip()
+    if link:
+        return "link:" + link
+
+    base = "|".join(str(registro.get(k, "") or "").strip().upper() for k in ["data", "titulo", "orgao"])
+    return "base:" + base
+
+
+def juntar_sem_apagar(atuais, novos):
+    combinados = []
+    vistos = set()
+
+    # Mantém todos os registros antigos.
+    for reg in atuais:
+        chave = chave_registro(reg)
+        if chave not in vistos:
+            vistos.add(chave)
+            combinados.append(reg)
+
+    adicionados = 0
+    for reg in novos:
+        chave = chave_registro(reg)
+        if chave not in vistos:
+            vistos.add(chave)
+            combinados.append(reg)
+            adicionados += 1
+
+    combinados.sort(key=lambda r: (data_ordenacao(r), str(r.get("numero") or "")), reverse=True)
+    return combinados, adicionados
+
+
+def atualizar_kpis(html, registros):
+    anos = {r.get("ano") for r in registros if r.get("ano")}
+    secoes = {r.get("secao") for r in registros if r.get("secao")}
+    orgaos = {r.get("orgao") for r in registros if r.get("orgao")}
+
+    substituicoes = {
+        "kpiTotal": len(registros),
+        "kpiAnos": len(anos),
+        "kpiSecoes": len(secoes),
+        "kpiOrgaos": len(orgaos),
+    }
+
+    for kpi_id, valor in substituicoes.items():
+        html = re.sub(
+            rf'(<div class="n" id="{re.escape(kpi_id)}">)(.*?)(</div>)',
+            rf'\g<1>{valor}\g<3>',
+            html,
+            count=1,
+            flags=re.DOTALL,
+        )
+
+    return html
+
+
+def atualizar_html(index_path, registros):
+    html = index_path.read_text(encoding="utf-8")
+    inicio, fim, _atuais = extrair_array_data(html)
+
+    novo_json = json.dumps(registros, ensure_ascii=False, separators=(",", ":"))
+    html = html[:inicio] + novo_json + html[fim:]
+    html = atualizar_kpis(html, registros)
+
+    index_path.write_text(html, encoding="utf-8")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--index", default="index.html", help="Caminho para o index.html")
+    parser.add_argument("--dias", type=int, default=10, help="Quantos dias para trás pesquisar")
+    parser.add_argument("--termo", default="portaria MESP", help="Termo de busca no DOU")
+    parser.add_argument("--busca-aberta", action="store_true", help="Usar busca sem aspas")
+    args = parser.parse_args()
+
+    index_path = Path(args.index)
+    if not index_path.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {index_path}")
+
+    html = index_path.read_text(encoding="utf-8")
+    _inicio, _fim, atuais = extrair_array_data(html)
+    print("Registros já existentes no index.html:", len(atuais))
+
+    novos = buscar_dou(
+        termo=args.termo,
+        dias=args.dias,
+        secoes=["todos"],
+        busca_exata=not args.busca_aberta,
+    )
+
+    combinados, adicionados = juntar_sem_apagar(atuais, novos)
+    print("Novos registros adicionados:", adicionados)
+    print("Total após atualização:", len(combinados))
+
+    if adicionados == 0:
+        print("Nenhum registro novo a acrescentar. O index.html não será alterado.")
         return 0
 
-    dados_atualizados = dados + novos
-
-    # Deduplicação final por link e, subsidiariamente, por título/data.
-    vistos_links: set[str] = set()
-    vistos_chaves: set[tuple[str, str]] = set()
-    dedup: list[dict] = []
-    for r in dados_atualizados:
-        link = str(r.get("link", "")).strip()
-        chave = (norm(r.get("titulo", "")), str(r.get("data", "")))
-        if link and link in vistos_links:
-            continue
-        if chave in vistos_chaves:
-            continue
-        if link:
-            vistos_links.add(link)
-        vistos_chaves.add(chave)
-        dedup.append(r)
-
-    dedup.sort(key=lambda r: (data_key(r), numero_key(r)), reverse=True)
-    novo_html = substituir_const_data(html_atual, dedup)
-    index_path.write_text(novo_html, encoding="utf-8")
-    print(f"Atualização concluída: {len(novos)} novo(s) registro(s). Total: {len(dedup)}.")
-    return len(novos)
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--index", default="index.html", help="Caminho para o index.html")
-    ap.add_argument("--dias", type=int, default=15, help="Quantidade de dias recentes a consultar")
-    ap.add_argument("--pausa", type=float, default=0.6, help="Pausa entre leituras de páginas")
-    args = ap.parse_args()
-    atualizar(Path(args.index), args.dias, args.pausa)
+    atualizar_html(index_path, combinados)
+    print("index.html atualizado com sucesso, sem apagar registros anteriores.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
