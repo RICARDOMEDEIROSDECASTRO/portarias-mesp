@@ -32,7 +32,7 @@ jobs:
 
       - name: Atualizar base do DOU sem apagar registros antigos
         run: |
-          python scripts/atualizar_dou.py --dias 30 --termo "portaria MESP"
+          python scripts/atualizar_dou.py --dias 3 --termo "portaria MESP"
 
       - name: Verificar alterações
         id: diff
@@ -49,10 +49,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add index.html
-          git commit -m "Atualiza portarias MESP do DOU"
+          git commit -m "Atualiza atos relacionados a Portaria MESP no DOU"
           git push
 
-      - name: Informar ausência de novas portarias
+      - name: Informar ausência de novas alterações
         if: steps.diff.outputs.changed == 'false'
         run: |
-          echo "Nenhuma nova Portaria MESP encontrada. Nada foi apagado."
+          echo "Nenhuma nova alteração encontrada. Nada foi apagado."
