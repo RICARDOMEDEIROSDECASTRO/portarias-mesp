@@ -1,0 +1,23 @@
+dag:
+  id: portarias_mesp
+  description: Pesquisa diária de Portarias MESP no Diário Oficial da União.
+  schedule: 0 7 * * *
+  search:
+    sources:
+      - DOU
+    terms:
+      - '"PORTARIA MESP"'
+    dou_sections:
+      - SECAO_1
+      - SECAO_2
+      - SECAO_3
+      - EDICAO_EXTRA
+      - EDICAO_SUPLEMENTAR
+    field: TITULO
+    pubtype:
+      - Portaria
+    department:
+      - Ministério do Esporte
+  report:
+    attach_csv: True
+    subject: Portarias MESP publicadas no DOU
