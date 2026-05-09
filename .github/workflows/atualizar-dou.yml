@@ -32,7 +32,7 @@ jobs:
 
       - name: Atualizar base do DOU sem apagar registros antigos
         run: |
-          python scripts/atualizar_dou.py --dias 10 --termo "portaria MESP"
+          python scripts/atualizar_dou.py --dias 30 --termo "portaria MESP"
 
       - name: Verificar alterações
         id: diff
