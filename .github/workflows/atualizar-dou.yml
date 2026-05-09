@@ -2,7 +2,7 @@ name: Atualizar portarias do DOU
 
 on:
   schedule:
-    # 10h UTC = 7h no horário de Brasília
+    # 10h UTC = 7h da manhã em Brasília
     - cron: "0 10 * * *"
   workflow_dispatch:
 
@@ -30,9 +30,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Atualizar base do DOU
+      - name: Atualizar base do DOU sem apagar registros antigos
         run: |
-          python scripts/atualizar_dou.py --dias 10 --termo "PORTARIA MESP"
+          python scripts/atualizar_dou.py --dias 10 --termo "portaria MESP"
 
       - name: Verificar alterações
         id: diff
@@ -49,10 +49,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add index.html
-          git commit -m "Atualiza portarias do DOU"
+          git commit -m "Atualiza portarias MESP do DOU"
           git push
 
       - name: Informar ausência de novas portarias
         if: steps.diff.outputs.changed == 'false'
         run: |
-          echo "Nenhuma nova portaria MESP encontrada no período pesquisado."
+          echo "Nenhuma nova Portaria MESP encontrada. Nada foi apagado."
