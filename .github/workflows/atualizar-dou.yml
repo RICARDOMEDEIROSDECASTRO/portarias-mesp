@@ -3,7 +3,7 @@ name: Atualizar portarias do DOU
 on:
   schedule:
     # Executa todos os dias às 07:00 no horário de Brasília
-    - cron: "26 8 * * *"
+    - cron: "0 7 * * *"
       timezone: "America/Sao_Paulo"
   workflow_dispatch:
 
@@ -13,7 +13,7 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   HORARIO_AGENDADO_BRT: "Todos os dias às 07:00, horário de Brasília"
-  CRON_CONFIGURADO: "26 8 * * *"
+  CRON_CONFIGURADO: "0 7 * * *"
   TIMEZONE_CONFIGURADO: "America/Sao_Paulo"
 
 jobs:
