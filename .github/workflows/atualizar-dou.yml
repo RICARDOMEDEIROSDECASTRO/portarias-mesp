@@ -2,8 +2,7 @@ name: Atualizar portarias do DOU
 
 on:
   schedule:
-    # Executa todos os dias às 7h da manhã no horário de Brasília.
-    # O GitHub Actions permite definir timezone IANA no agendamento.
+    # Executa todos os dias às 07:00 no horário de Brasília
     - cron: "0 7 * * *"
       timezone: "America/Sao_Paulo"
   workflow_dispatch:
@@ -69,22 +68,23 @@ jobs:
           cron_configurado = os.environ.get("CRON_CONFIGURADO", "0 7 * * *")
           timezone_configurado = os.environ.get("TIMEZONE_CONFIGURADO", "America/Sao_Paulo")
           run_number = os.environ.get("GITHUB_RUN_NUMBER", "")
-          sha = os.environ.get("GITHUB_SHA", "")
 
           bloco = f"""
-          <div id="info-atualizacao" style="margin: 16px 0; padding: 12px 14px; border: 1px solid #ddd; border-radius: 10px; background: #fafafa; font-size: 0.95rem; line-height: 1.45;">
-            <strong>Última atualização da base:</strong> {ultima_atualizacao_brt}<br>
-            <strong>Horário agendado:</strong> {horario_agendado}<br>
-            <strong>Cron configurado:</strong> {cron_configurado}<br>
-            <strong>Fuso horário:</strong> {timezone_configurado}<br>
-            <strong>Última atualização em UTC:</strong> {ultima_atualizacao_utc}<br>
-            <strong>Execução GitHub Actions:</strong> nº {run_number}
+          <div id="info-atualizacao" style="margin: 10px 0 0 0; padding: 8px 10px; border-radius: 8px; background: rgba(255,255,255,0.14); color: #ffffff; font-size: 0.82rem; line-height: 1.4;">
+            <strong>Última atualização:</strong> {ultima_atualizacao_brt}
+            <span style="opacity: 0.85;"> · </span>
+            <strong>Agendada:</strong> diariamente às 07:00 BRT
+            <span style="opacity: 0.85;"> · </span>
+            <strong>Execução:</strong> nº {run_number}
+            <br>
+            <span style="opacity: 0.82;">
+              Cron: {cron_configurado} · Fuso: {timezone_configurado} · UTC: {ultima_atualizacao_utc}
+            </span>
           </div>
           """.strip()
 
           inicio = "<!-- INICIO_INFO_ATUALIZACAO -->"
           fim = "<!-- FIM_INFO_ATUALIZACAO -->"
-
           novo_trecho = f"{inicio}\n{bloco}\n{fim}"
 
           if inicio in html and fim in html:
@@ -95,8 +95,19 @@ jobs:
                   flags=re.DOTALL
               )
           else:
-              # Tenta inserir logo após a abertura do <body>.
-              if re.search(r"<body[^>]*>", html, flags=re.IGNORECASE):
+              # Preferencialmente insere o bloco dentro da área azul/verde do cabeçalho,
+              # logo após o parágrafo principal, se ele existir.
+              padrao_paragrafo_header = r"(Base obtida por raspagem do DOU\.\s*</[^>]+>)"
+
+              if re.search(padrao_paragrafo_header, html, flags=re.IGNORECASE):
+                  html = re.sub(
+                      padrao_paragrafo_header,
+                      r"\1\n" + novo_trecho,
+                      html,
+                      count=1,
+                      flags=re.IGNORECASE
+                  )
+              elif re.search(r"<body[^>]*>", html, flags=re.IGNORECASE):
                   html = re.sub(
                       r"(<body[^>]*>)",
                       r"\1\n" + novo_trecho + "\n",
@@ -105,7 +116,6 @@ jobs:
                       flags=re.IGNORECASE
                   )
               else:
-                  # Se não houver <body>, insere no início do arquivo.
                   html = novo_trecho + "\n" + html
 
           index_path.write_text(html, encoding="utf-8")
