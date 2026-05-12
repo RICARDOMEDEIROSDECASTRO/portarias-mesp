@@ -1,6 +1,0 @@
-- name: Mostrar horário real
-  run: |
-    echo "UTC:"
-    date -u
-    echo "Brasília:"
-    TZ="America/Sao_Paulo" date
