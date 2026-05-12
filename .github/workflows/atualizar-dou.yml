@@ -3,7 +3,7 @@ name: Atualizar portarias do DOU
 on:
   schedule:
     # 10h UTC = 7h da manhã em Brasília
-    - cron: "0 10 * * *"
+    - cron: "10 8 * * *"
   workflow_dispatch:
 
 permissions:
