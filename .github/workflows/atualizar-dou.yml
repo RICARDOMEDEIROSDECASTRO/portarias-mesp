@@ -2,8 +2,10 @@ name: Atualizar portarias do DOU
 
 on:
   schedule:
-    # 10h UTC = 7h da manhã em Brasília
-    - cron: "10 8 * * *"
+    # Executa todos os dias às 7h da manhã no horário de Brasília.
+    # O GitHub Actions permite definir timezone IANA no agendamento.
+    - cron: "0 7 * * *"
+      timezone: "America/Sao_Paulo"
   workflow_dispatch:
 
 permissions:
@@ -11,6 +13,9 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  HORARIO_AGENDADO_BRT: "Todos os dias às 07:00, horário de Brasília"
+  CRON_CONFIGURADO: "0 7 * * *"
+  TIMEZONE_CONFIGURADO: "America/Sao_Paulo"
 
 jobs:
   atualizar:
@@ -34,6 +39,78 @@ jobs:
         run: |
           python scripts/atualizar_dou.py --dias 3 --termo "portaria MESP"
 
+      - name: Inserir informações de atualização na página
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import os
+          import re
+
+          index_path = Path("index.html")
+
+          if not index_path.exists():
+              raise FileNotFoundError("Arquivo index.html não encontrado na raiz do repositório.")
+
+          html = index_path.read_text(encoding="utf-8")
+
+          agora_brt = datetime.now(ZoneInfo("America/Sao_Paulo"))
+          agora_utc = datetime.now(ZoneInfo("UTC"))
+
+          ultima_atualizacao_brt = agora_brt.strftime("%d/%m/%Y às %H:%M:%S")
+          ultima_atualizacao_utc = agora_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+          horario_agendado = os.environ.get(
+              "HORARIO_AGENDADO_BRT",
+              "Todos os dias às 07:00, horário de Brasília"
+          )
+
+          cron_configurado = os.environ.get("CRON_CONFIGURADO", "0 7 * * *")
+          timezone_configurado = os.environ.get("TIMEZONE_CONFIGURADO", "America/Sao_Paulo")
+          run_number = os.environ.get("GITHUB_RUN_NUMBER", "")
+          sha = os.environ.get("GITHUB_SHA", "")
+
+          bloco = f"""
+          <div id="info-atualizacao" style="margin: 16px 0; padding: 12px 14px; border: 1px solid #ddd; border-radius: 10px; background: #fafafa; font-size: 0.95rem; line-height: 1.45;">
+            <strong>Última atualização da base:</strong> {ultima_atualizacao_brt}<br>
+            <strong>Horário agendado:</strong> {horario_agendado}<br>
+            <strong>Cron configurado:</strong> {cron_configurado}<br>
+            <strong>Fuso horário:</strong> {timezone_configurado}<br>
+            <strong>Última atualização em UTC:</strong> {ultima_atualizacao_utc}<br>
+            <strong>Execução GitHub Actions:</strong> nº {run_number}
+          </div>
+          """.strip()
+
+          inicio = "<!-- INICIO_INFO_ATUALIZACAO -->"
+          fim = "<!-- FIM_INFO_ATUALIZACAO -->"
+
+          novo_trecho = f"{inicio}\n{bloco}\n{fim}"
+
+          if inicio in html and fim in html:
+              html = re.sub(
+                  rf"{re.escape(inicio)}.*?{re.escape(fim)}",
+                  novo_trecho,
+                  html,
+                  flags=re.DOTALL
+              )
+          else:
+              # Tenta inserir logo após a abertura do <body>.
+              if re.search(r"<body[^>]*>", html, flags=re.IGNORECASE):
+                  html = re.sub(
+                      r"(<body[^>]*>)",
+                      r"\1\n" + novo_trecho + "\n",
+                      html,
+                      count=1,
+                      flags=re.IGNORECASE
+                  )
+              else:
+                  # Se não houver <body>, insere no início do arquivo.
+                  html = novo_trecho + "\n" + html
+
+          index_path.write_text(html, encoding="utf-8")
+          PY
+
       - name: Verificar alterações
         id: diff
         run: |
@@ -49,7 +126,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add index.html
-          git commit -m "Atualiza atos relacionados a Portaria MESP no DOU"
+          git commit -m "Atualiza atos do DOU e horário da atualização"
           git push
 
       - name: Informar ausência de novas alterações
