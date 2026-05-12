@@ -3,7 +3,7 @@ name: Atualizar portarias do DOU
 on:
   schedule:
     # Executa todos os dias às 07:00 no horário de Brasília
-    - cron: "0 7 * * *"
+    - cron: "26 8 * * *"
       timezone: "America/Sao_Paulo"
   workflow_dispatch:
 
