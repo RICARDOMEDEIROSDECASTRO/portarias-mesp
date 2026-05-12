@@ -13,7 +13,7 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   HORARIO_AGENDADO_BRT: "Todos os dias às 07:00, horário de Brasília"
-  CRON_CONFIGURADO: "0 7 * * *"
+  CRON_CONFIGURADO: "26 8 * * *"
   TIMEZONE_CONFIGURADO: "America/Sao_Paulo"
 
 jobs:
